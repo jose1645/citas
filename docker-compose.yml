@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_DB=flowcuts_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/code
+    ports:
+      - "8051:8000"
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/flowcuts_db
+      - DEBUG=1
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:

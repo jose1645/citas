@@ -113,7 +113,7 @@ class WhatsAppClient:
         }
         return self.send_message(to, data)
 
-    def sync_catalog_product(self, retailer_id, name, description, price, image_url, is_active=True):
+    def sync_catalog_product(self, retailer_id, name, description, price, image_url, is_active=True, brand="Bot Barber"):
         from .models import MetaConfig
         db_config = MetaConfig.objects.filter(is_active=True).first()
         catalog_id = db_config.catalog_id if db_config else None
@@ -142,7 +142,8 @@ class WhatsAppClient:
                         "url": "https://barber.synteck.org/",
                         "image_url": image_url or default_img,
                         "condition": "new",
-                        "availability": "in stock" if is_active else "out of stock"
+                        "availability": "in stock" if is_active else "out of stock",
+                        "brand": brand[:100]
                     }
                 }
             ]

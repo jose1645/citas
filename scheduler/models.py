@@ -66,7 +66,8 @@ class Service(models.Model):
                 description=self.description,
                 price=self.price,
                 image_url=self.image_url,
-                is_active=self.is_active
+                is_active=self.is_active,
+                brand=self.shop.name
             )
         except Exception as e:
             # Prevent failure during tests/offline modes

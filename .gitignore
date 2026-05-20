@@ -28,3 +28,8 @@ env.rm
 
 # Docker
 .dockerignore
+
+# IDEs
+.idea/
+.vscode/
+

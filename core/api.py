@@ -568,3 +568,277 @@ def flow_endpoint_view(request):
     except Exception as e:
         logger.error(f"Error in flow endpoint: {str(e)}")
         return JsonResponse({"error": "Internal Server Error"}, status=500)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MOBILE APP ENDPOINTS — FlowCuts Admin App
+# ─────────────────────────────────────────────────────────────────────────────
+
+from typing import Optional, List
+from ninja.security import HttpBearer
+from django.contrib.auth import authenticate
+from ninja import Schema as NinjaSchema
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+class LoginSchema(NinjaSchema):
+    username: str
+    password: str
+
+class TokenSchema(NinjaSchema):
+    token: str
+    user_id: int
+    username: str
+    is_owner: bool
+
+@router.post("/auth/login", response=TokenSchema, tags=["mobile"])
+def mobile_login(request, payload: LoginSchema):
+    """Login para la app móvil. Retorna un token de sesión simple."""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    user = authenticate(username=payload.username, password=payload.password)
+    if not user:
+        from ninja.errors import HttpError
+        raise HttpError(401, "Credenciales incorrectas")
+    # Generate a simple token (use proper token auth in production)
+    import hashlib, time
+    token_raw = f"{user.id}{user.username}{time.time()}{settings.SECRET_KEY}"
+    token = hashlib.sha256(token_raw.encode()).hexdigest()
+    # Store in session or cache (simple approach: use Django sessions)
+    request.session['mobile_token'] = token
+    request.session['mobile_user_id'] = user.id
+    return {
+        "token": token,
+        "user_id": user.id,
+        "username": user.username,
+        "is_owner": getattr(user, 'is_owner', False),
+    }
+
+# ── Dashboard / Stats ─────────────────────────────────────────────────────────
+
+class DashboardSchema(NinjaSchema):
+    shop_id: int
+    shop_name: str
+    today_appointments: int
+    pending_appointments: int
+    confirmed_appointments: int
+    cancelled_appointments: int
+    total_appointments_month: int
+    total_staff: int
+    total_services: int
+
+@router.get("/mobile/dashboard/{shop_id}", response=DashboardSchema, tags=["mobile"])
+def mobile_dashboard(request, shop_id: int):
+    """Estadísticas del dashboard para la app móvil."""
+    from django.shortcuts import get_object_or_404
+    from django.utils import timezone
+    import datetime as dt_module
+    
+    shop = get_object_or_404(BarberShop, pk=shop_id, is_active=True)
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + dt_module.timedelta(days=1)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    today_qs = Appointment.objects.filter(shop=shop, start_time__gte=today_start, start_time__lt=today_end)
+    
+    return {
+        "shop_id": shop.id,
+        "shop_name": shop.name,
+        "today_appointments": today_qs.count(),
+        "pending_appointments": today_qs.filter(status="scheduled").count(),
+        "confirmed_appointments": today_qs.filter(status="confirmed").count(),
+        "cancelled_appointments": today_qs.filter(status="cancelled").count(),
+        "total_appointments_month": Appointment.objects.filter(shop=shop, start_time__gte=month_start).count(),
+        "total_staff": Staff.objects.filter(shop=shop, is_active=True).count(),
+        "total_services": Service.objects.filter(shop=shop, is_active=True).count(),
+    }
+
+# ── Appointments ──────────────────────────────────────────────────────────────
+
+class AppointmentOutSchema(NinjaSchema):
+    id: int
+    client_name: str
+    client_phone: str
+    service_name: str
+    service_price: float
+    staff_name: str
+    start_time: str
+    end_time: Optional[str]
+    status: str
+    created_at: str
+
+class AppointmentCreateSchema(NinjaSchema):
+    shop_id: int
+    staff_id: int
+    service_id: int
+    client_name: str
+    client_phone: str
+    start_time: str  # ISO format: "2026-05-20T10:00:00"
+
+class AppointmentStatusSchema(NinjaSchema):
+    status: str  # scheduled, confirmed, cancelled, completed
+
+@router.get("/mobile/appointments/{shop_id}", response=List[AppointmentOutSchema], tags=["mobile"])
+def mobile_list_appointments(request, shop_id: int, date: str = None, status: str = None):
+    """Lista citas de una barbería. Opcional: filtrar por fecha (YYYY-MM-DD) o estado."""
+    from django.shortcuts import get_object_or_404
+    shop = get_object_or_404(BarberShop, pk=shop_id)
+    qs = Appointment.objects.filter(shop=shop).select_related('staff', 'service').order_by('start_time')
+    
+    if date:
+        from django.utils import timezone
+        import datetime as dt_module
+        try:
+            filter_date = dt_module.datetime.strptime(date, "%Y-%m-%d").date()
+            qs = qs.filter(start_time__date=filter_date)
+        except ValueError:
+            pass
+    
+    if status:
+        qs = qs.filter(status=status)
+    
+    result = []
+    for appt in qs:
+        result.append({
+            "id": appt.id,
+            "client_name": appt.client_name,
+            "client_phone": appt.client_phone,
+            "service_name": appt.service.name,
+            "service_price": float(appt.service.price),
+            "staff_name": appt.staff.name,
+            "start_time": appt.start_time.isoformat(),
+            "end_time": appt.end_time.isoformat() if appt.end_time else None,
+            "status": appt.status,
+            "created_at": appt.created_at.isoformat(),
+        })
+    return result
+
+@router.post("/mobile/appointments", response=AppointmentOutSchema, tags=["mobile"])
+def mobile_create_appointment(request, payload: AppointmentCreateSchema):
+    """Crear una nueva cita manualmente desde la app móvil."""
+    from django.shortcuts import get_object_or_404
+    from django.utils.timezone import make_aware
+    import datetime as dt_module
+    
+    shop = get_object_or_404(BarberShop, pk=payload.shop_id)
+    staff = get_object_or_404(Staff, pk=payload.staff_id, shop=shop)
+    service = get_object_or_404(Service, pk=payload.service_id, shop=shop)
+    
+    naive_dt = dt_module.datetime.fromisoformat(payload.start_time)
+    from zoneinfo import ZoneInfo
+    local_tz = ZoneInfo(shop.timezone or 'America/Mexico_City')
+    start_dt = naive_dt.replace(tzinfo=local_tz)
+    
+    appt = Appointment.objects.create(
+        shop=shop,
+        staff=staff,
+        service=service,
+        client_name=payload.client_name,
+        client_phone=payload.client_phone,
+        start_time=start_dt,
+        status="scheduled"
+    )
+    
+    return {
+        "id": appt.id,
+        "client_name": appt.client_name,
+        "client_phone": appt.client_phone,
+        "service_name": service.name,
+        "service_price": float(service.price),
+        "staff_name": staff.name,
+        "start_time": appt.start_time.isoformat(),
+        "end_time": appt.end_time.isoformat() if appt.end_time else None,
+        "status": appt.status,
+        "created_at": appt.created_at.isoformat(),
+    }
+
+@router.put("/mobile/appointments/{appointment_id}/status", tags=["mobile"])
+def mobile_update_appointment_status(request, appointment_id: int, payload: AppointmentStatusSchema):
+    """Actualizar el estado de una cita (scheduled, confirmed, cancelled, completed)."""
+    from django.shortcuts import get_object_or_404
+    valid_statuses = ["scheduled", "confirmed", "cancelled", "completed"]
+    if payload.status not in valid_statuses:
+        from ninja.errors import HttpError
+        raise HttpError(400, f"Estado inválido. Opciones: {', '.join(valid_statuses)}")
+    appt = get_object_or_404(Appointment, pk=appointment_id)
+    appt.status = payload.status
+    appt.save()
+    return {"success": True, "appointment_id": appointment_id, "new_status": payload.status}
+
+@router.delete("/mobile/appointments/{appointment_id}", tags=["mobile"])
+def mobile_delete_appointment(request, appointment_id: int):
+    """Cancelar/eliminar una cita."""
+    from django.shortcuts import get_object_or_404
+    appt = get_object_or_404(Appointment, pk=appointment_id)
+    appt.delete()
+    return {"success": True, "message": "Cita eliminada"}
+
+# ── Staff ─────────────────────────────────────────────────────────────────────
+
+class StaffOutSchema(NinjaSchema):
+    id: int
+    name: str
+    is_active: bool
+    shop_id: int
+
+@router.get("/mobile/staff/{shop_id}", response=List[StaffOutSchema], tags=["mobile"])
+def mobile_list_staff(request, shop_id: int):
+    """Lista el personal de una barbería."""
+    from django.shortcuts import get_object_or_404
+    shop = get_object_or_404(BarberShop, pk=shop_id)
+    staff = Staff.objects.filter(shop=shop).order_by('name')
+    return [{"id": s.id, "name": s.name, "is_active": s.is_active, "shop_id": shop_id} for s in staff]
+
+# ── Services ──────────────────────────────────────────────────────────────────
+
+class ServiceOutSchema(NinjaSchema):
+    id: int
+    name: str
+    description: Optional[str]
+    price: float
+    duration_minutes: int
+    image_url: Optional[str]
+    is_active: bool
+
+@router.get("/mobile/services/{shop_id}", response=List[ServiceOutSchema], tags=["mobile"])
+def mobile_list_services(request, shop_id: int):
+    """Lista los servicios de una barbería."""
+    from django.shortcuts import get_object_or_404
+    shop = get_object_or_404(BarberShop, pk=shop_id)
+    services = Service.objects.filter(shop=shop, is_active=True).order_by('name')
+    return [{
+        "id": s.id,
+        "name": s.name,
+        "description": s.description,
+        "price": float(s.price),
+        "duration_minutes": s.duration_minutes,
+        "image_url": s.image_url,
+        "is_active": s.is_active,
+    } for s in services]
+
+# ── Shop Update ───────────────────────────────────────────────────────────────
+
+class ShopUpdateSchema(NinjaSchema):
+    name: Optional[str] = None
+    address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    business_hours: Optional[str] = None
+
+@router.patch("/mobile/shops/{shop_id}", tags=["mobile"])
+def mobile_update_shop(request, shop_id: int, payload: ShopUpdateSchema):
+    """Actualizar datos generales de la barbería desde la app móvil."""
+    from django.shortcuts import get_object_or_404
+    shop = get_object_or_404(BarberShop, pk=shop_id)
+    if payload.name is not None:
+        shop.name = payload.name
+    if payload.address is not None:
+        shop.address = payload.address
+    if payload.latitude is not None:
+        shop.latitude = payload.latitude
+    if payload.longitude is not None:
+        shop.longitude = payload.longitude
+    if payload.business_hours is not None:
+        shop.business_hours = payload.business_hours
+    shop.save()
+    return {"success": True, "message": "Barbería actualizada correctamente"}

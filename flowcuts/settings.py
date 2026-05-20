@@ -51,6 +51,10 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'core',
     'ninja',
+    'scheduler.apps.SchedulerConfig',
+    'notifications.apps.NotificationsConfig',
+    'payments.apps.PaymentsConfig',
+    'partners.apps.PartnersConfig',
 ]
 
 MIDDLEWARE = [
@@ -180,3 +184,18 @@ STORAGES = {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
+
+# Bypass migrations during unit testing for extreme speed and clean database schemas
+import sys
+if 'test' in sys.argv:
+    MIGRATION_MODULES = {
+        'core': None,
+        'scheduler': None,
+        'notifications': None,
+        'payments': None,
+        'partners': None,
+        'admin': None,
+        'auth': None,
+        'contenttypes': None,
+        'sessions': None,
+    }
